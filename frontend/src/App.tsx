@@ -63,7 +63,7 @@ export default function App() {
       setTimeout(() => setActiveStep(3), 1600);
       setTimeout(() => setActiveStep(4), 2500);
 
-      const res = await fetch('http://localhost:8000/api/process-bill', { 
+      const res = await fetch('https://vyaparmind-ai.onrender.com/', { 
         method: 'POST', 
         body: formData 
       });
