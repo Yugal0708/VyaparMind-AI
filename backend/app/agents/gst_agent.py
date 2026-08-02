@@ -1,61 +1,67 @@
-import json
-from google import genai
-from google.genai import types
-from app.core.config import settings
-
 
 
 class GSTEngineAgent:
-    async def calculate_gst(self, raw_receipt: dict) -> dict:
-        items = raw_receipt.get("items", [])
-        subtotal = 0.0
-        total_cgst = 0.0
-        total_sgst = 0.0
+    def _clean(self, val):
+        """Removes all commas and rupees signs so Math never fails"""
+        if not val: return 0.0
+        c = "".join(x for x in str(val) if x.isdigit() or x == '.')
+        if c.count('.') > 1: c = c.replace('.', '', c.count('.') - 1)
+        try: return float(c) if c else 0.0
+        except: return 0.0
+
+    async def calculate_gst(self, receipt: dict) -> dict:
+        items = receipt.get("items", [])
+        tot_tax = 0.0
+        tot_sum = 0.0
         
-        updated_items = []
-        for item in items:
-            name = str(item.get("item_name", "")).upper()
-            hsn = str(item.get("hsn_code", ""))
+        for i in items:
+            # Extract and Clean Data
+            name = str(i.get("name", i.get("item_name", "ITEM"))).upper()
+            qty = self._clean(i.get("qty", i.get("quantity", 1))) or 1.0
+            price = self._clean(i.get("price", i.get("unit_price", 0)))
             
-            # Read rate from vision extraction if available, otherwise apply intelligent Kirana slab
-            extracted_rate = item.get("gst_rate")
+            it_tot = self._clean(i.get("total", i.get("total_amount", 0)))
+            if it_tot <= 0: it_tot = qty * price
             
-            if extracted_rate is not None and float(extracted_rate) > 0:
-                gst_rate = float(extracted_rate)
-            else:
-                # Intelligent Kirana & Retail Tax Slab Router (Bharat MSME compliant)
-                if any(keyword in name for keyword in ["CHANA", "DAL", "BESAN", "SUGAR", "SABUDANA", "RAJAM", "OIL", "WHEAT", "ATTA", "RICE", "SALT"]):
-                    # Essential food grains & edible oils in kirana are 0% or 5%
-                    gst_rate = 0.0 if "CHANA" in name or "DAL" in name or "SUGAR" in name else 5.0
-                elif "PARLE" in name or "biscuit" in name.lower():
-                    gst_rate = 18.0 # Packaged biscuits / processed items
-                else:
-                    gst_rate = 5.0 # Standard kirana food item fallback
+            tax_v = self._clean(i.get("tax_amount", i.get("tax", 0)))
             
-            # If bill image explicitly specifies tax values, honor them, else compute
-            base_price = float(item.get("total_amount", item.get("unit_price", 0) * item.get("quantity", 1)))
+            # Inclusive Tax Logic (Tax is extracted FROM total, not added)
+            if tax_v == 0 and it_tot > 0:
+                rate = 5.0
+                if any(k in name for k in ["CHANA", "DAL", "SUGAR", "SALT", "RICE", "WHEAT", "ATTA", "MASOOR", "UDAD", "BESAN"]): 
+                    rate = 0.0
+                elif any(k in name for k in ["PARLE", "BISCUIT", "SOAP"]): 
+                    rate = 18.0
+                
+                if rate > 0: 
+                    tax_v = round(it_tot - (it_tot / (1 + (rate / 100.0))), 2)
+
+            i["gst"] = f"₹{tax_v}" if tax_v > 0 else "0%"
+            i["tax_amount"] = tax_v
+            i["qty"] = qty
+            i["price"] = price
+            i["total"] = round(it_tot, 2)
+            i["name"] = name  # Force set name for frontend
             
-            item_tax = base_price * (gst_rate / 100.0)
-            cgst = round(item_tax / 2, 2)
-            sgst = round(item_tax / 2, 2)
-            
-            item["gst_rate"] = gst_rate
-            item["cgst"] = cgst
-            item["sgst"] = sgst
-            item["total_amount"] = round(base_price + item_tax, 2)
-            
-            subtotal += base_price
-            total_cgst += cgst
-            total_sgst += sgst
-            updated_items.append(item)
-            
-        raw_receipt["items"] = updated_items
-        raw_receipt["subtotal"] = round(subtotal, 2)
-        raw_receipt["cgst"] = round(total_cgst, 2)
-        raw_receipt["sgst"] = round(total_sgst, 2)
-        raw_receipt["grand_total"] = round(subtotal + total_cgst + total_sgst, 2)
+            tot_tax += tax_v
+            tot_sum += it_tot
+
+        # Finalize Totals
+        ext_g = self._clean(receipt.get("grand_total", 0))
+        fg = ext_g if abs(ext_g - tot_sum) < 100 and ext_g > 0 else tot_sum
+        sub = round(fg - tot_tax, 2)
         
-        return raw_receipt
+        # Force set all totals for frontend
+        receipt["tax"] = round(tot_tax, 2)
+        receipt["tax_amount"] = round(tot_tax, 2)
+        receipt["total_tax"] = round(tot_tax, 2)
+        
+        receipt["grand_total"] = round(fg, 2)
+        receipt["total_amount"] = round(fg, 2)
+        receipt["total"] = round(fg, 2)
+        
+        receipt["subtotal"] = sub
+        
+        return receipt
 
 gst_agent = GSTEngineAgent()
-
